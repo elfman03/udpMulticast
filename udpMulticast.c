@@ -32,6 +32,8 @@ unsigned int getTicks() {
 
 #ifdef _WIN32
   ret=(unsigned int)GetTickCount();
+#else
+  TODO.  PUT IN SOME LINUX MILLISECOND COLLECTION HERE
 #endif
 
   return ret;
@@ -45,10 +47,12 @@ unsigned int getTicks() {
 //  Globals are not great but for a simple app they are so easy to use.
 //
 
-int theMode=MODE_UNK;     // record or play?
-const char *theFile=0;    // the input/output file
-const char *theGroup=0;   // the multicast group
-int thePort=0;            // the multicast port
+int theMode=MODE_UNK;       // record or play?
+const char *theFileName=0;  // the input/output filename
+FILE *theFile=0;            // the input/output FILE
+const char *theGroup=0;     // the multicast group
+int thePort=0;              // the multicast port
+const char *theInterface=0; // The interface to use (null for INADDR_ANY or the ip address of adapter)
 
 const char *modeStrings[3]={"Unknown","Record","Play"};
 
@@ -64,17 +68,23 @@ void Usage(const char *msg) {
   }
   fprintf(stderr,"udpMulticast - a UDP multicast recorder/replayer\n\nUsage:\n\n");
   fprintf(stderr,"  udpMulticast -record {filename} {group} {port}\n");
-  fprintf(stderr,"  udpMulticast -play   {filename} {group} {port}\n\n\n");
+  fprintf(stderr,"  udpMulticast -play   {filename} {group} {port} [-interface {ip}]\n\n\n");
   fprintf(stderr,"Examples:\n");
   fprintf(stderr,"  udpMulticast -record capture.bin 239.255.42.42 5004)\n");
   fprintf(stderr,"     - capture udp broadcast stream from selected JTech hdbitt extenders)\n\n");
+  fprintf(stderr,"  udpMulticast -play   capture.bin 239.255.42.42 5004)\n");
+  fprintf(stderr,"     - replay udp stream previously captured from JTECH hdbitt extender)\n\n");
+  fprintf(stderr,"  udpMulticast -play   capture.bin 239.255.42.42 5004 -interface 192.168.1.1)\n");
+  fprintf(stderr,"     - replay stream as above but to the interface with IP address 192.168.1.1)\n\n");
 }
 
 int handleArgs(int argc, char *argv[]) {
+  char msg[1024];
+
   // returns -1 on error, 0 on success
   //
-  if (argc != 5) {
-    Usage("Invalid parameter count.  Four required");
+  if (argc != 5 && argc!=7) {
+    Usage("Invalid parameter count.  Four or six required");
     return -1;
   }
   if (!strcmp(argv[1],"-record")) {
@@ -87,39 +97,201 @@ int handleArgs(int argc, char *argv[]) {
     Usage("Invalid first parameter.  must be '-record' or '-play'");
     return -1;
   }
-  theFile=argv[2];  // e.g., record.bin
+
+  // Handle hardcoding interface
+  //
+  if(theMode!=MODE_PLAY && argc>5) {
+    Usage("Only play mode supports -interface parameter");
+    return -1;
+  }
+  if(argc==7 && strcmp(argv[5],"-interface")) {
+    Usage("Invalid 5th parameter.  must be '-interface'");
+    return -1;
+  }
+  if(argc==7) {
+    theInterface=argv[6];
+  }
+
+  theFileName=argv[2];  // e.g., record.bin
+  if(theMode==MODE_RECORD) {
+    theFile=fopen(theFileName,"wb");
+  } else {
+    theFile=fopen(theFileName,"rb");
+  }
+  if(!theFile) {
+    sprintf(msg,"Cannot open file '%s'",theFileName);
+    Usage(msg);
+    return 1;
+  }
+
   theGroup=argv[3]; // e.g., 239.255.255.250 for SSDP
   thePort=atoi(argv[4]); // 0 if error, which is an invalid port
   if(!thePort) {
-    char msg[1024];
     sprintf(msg,"Invalid port number '%s'",argv[4]);
     Usage(msg);
     return -1;
   }
-  fprintf(stderr,"Lets Go!  %s %s udp://%s:%d\n",modeStrings[theMode],theFile,theGroup,thePort);
+  fprintf(stderr,"Lets Go!  %s %s udp://%s:%d\n",modeStrings[theMode],theFileName,theGroup,thePort);
   return 0;
 }
 
-int main(int argc, char *argv[])
-{
+int recorder(int fd) {
     unsigned int firstTick=0;
     packetType packet;
-    FILE *filer=0;
+    int packetCt=0;
+    int netBytes=0;
 
-    int ret=handleArgs(argc,argv);
-    if(ret) { return ret; }
+  // allow multiple sockets to use the same PORT number
+  //
+  u_int yes = 1;
+  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char*) &yes, sizeof(yes)) < 0) {
+     perror("Reusing ADDR failed");
+     return 1;
+  }
 
-    if(theMode==MODE_RECORD) {
-      filer=fopen(theFile,"wb");
-    } else {
-      filer=fopen(theFile,"rb");
-    }
-    if(!filer) {
-      sprintf(packet.payload,"Cannot open file '%s'",theFile);
-      Usage(packet.payload);
+  // set up destination address
+  //
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_ANY); // differs from sender
+  addr.sin_port = htons(thePort);
+
+  // bind to receive address
+  //
+  if (bind(fd, (struct sockaddr*) &addr, sizeof(addr)) < 0) {
+      perror("bind");
+      return 1;
+  }
+
+  // use setsockopt() to request that the kernel join a multicast group
+  //
+  struct ip_mreq mreq;
+  mreq.imr_multiaddr.s_addr = inet_addr(theGroup);
+  mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+  if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char*) &mreq, sizeof(mreq)) < 0) {
+      perror("setsockopt");
+      return 1;
+  }
+
+  // now just enter a read-print loop
+  //
+  while (1) {
+      int addrlen = sizeof(addr);
+      int nbytes = recvfrom(
+          fd,
+          packet.payload,
+          PACKET_MAX,
+          0,
+          (struct sockaddr *) &addr,
+          &addrlen
+      );
+      if (nbytes < 0) {
+          perror("recvfrom");
+          return 1;
+      }
+      packet.tick=getTicks();
+      if(!firstTick) { firstTick=packet.tick; }
+      packet.tick=packet.tick-firstTick;
+      packet.payloadSz=(unsigned int)nbytes;
+      fwrite(&packet,1,nbytes+8,theFile);
+      packetCt++;
+      netBytes=netBytes+nbytes;
+      if(packetCt%500==1) {
+        fprintf(stderr,"t=%u ct=%d netb=%d b=%d\n",packet.tick,packetCt,netBytes,packet.payloadSz);
+      }
+  }
+  return 0;
+}
+
+int player(int fd) {
+  unsigned int tick,firstTick=0;
+  packetType packet;
+  int packetCt=0;
+  int dataPacketCt=0;
+  int zeroPacketCt=0;
+  int netBytes=0;
+
+  // set up destination address
+  //
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = inet_addr(theGroup);
+  addr.sin_port = htons(thePort);
+  
+  // 
+  // Specific interface for multicast https://stackoverflow.com/questions/9701561/how-to-specify-the-multicast-send-interface-in-python
+  //
+  if(theInterface) {
+    unsigned long sa=inet_addr(theInterface);
+    if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa)) < 0) {
+      perror("setsockopt");
       return 1;
     }
+  }
 
+  // get first header
+  //
+  fread(&packet,1,8,theFile);
+  //
+  while (!feof(theFile)) {
+    //
+    // reconsider this if we want to send the zero length packets too.  for now skip them.
+    //
+    if(packet.payloadSz) {
+      // fetch remainder of packet
+      //
+      fread(packet.payload,1,packet.payloadSz,theFile);
+
+      // Is this packet supposed to be in the future?  Is so, wait for its timeslot.
+      //
+      tick=getTicks();
+      if(!firstTick) { firstTick=tick; }
+      unsigned int toffset=tick-firstTick;
+      if(packet.tick > toffset) {
+#ifdef _WIN32
+        Sleep(packet.tick - toffset);
+#else
+        TODO.  PUT IN SOME LINUX MILLISECOND USLEEP HERE
+#endif
+      }
+
+      // It is time.  Lets send it
+      //
+      int nbytes = sendto(
+         fd,
+         packet.payload,
+         packet.payloadSz,
+         0,
+         (struct sockaddr*) &addr,
+         sizeof(addr)
+      );
+      if (nbytes < 0) {
+         perror("sendto");
+         return 1;
+      }
+      dataPacketCt++;
+      netBytes=netBytes+packet.payloadSz;
+    } else {
+      zeroPacketCt++;
+    }
+    packetCt++;
+    if(packetCt%500==1) {
+      fprintf(stderr,"t=%u dct=%d zct=%d netb=%dd\n",packet.tick,dataPacketCt,zeroPacketCt,netBytes);
+    }
+
+    // read next header
+    fread(&packet,1,8,theFile);
+  }
+  fprintf(stderr,"EOF.  Wrote %d bytes from %d data packets. skipped %d zero packets\n",netBytes,packetCt,zeroPacketCt);
+  return 0;
+}
+
+int main(int argc, char *argv[]) {
+    char msg[1024];
+    int ret=handleArgs(argc,argv);
+    if(ret) { return ret; }
 
 #ifdef _WIN32
     //
@@ -140,67 +312,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // allow multiple sockets to use the same PORT number
-    //
-    u_int yes = 1;
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char*) &yes, sizeof(yes)) < 0) {
-       perror("Reusing ADDR failed");
-       return 1;
-    }
+    if(theMode==MODE_RECORD) { recorder(fd); }
+    if(theMode==MODE_PLAY)   { player(fd);   }
 
-    // set up destination address
-    //
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_ANY); // differs from sender
-    addr.sin_port = htons(thePort);
-
-    // bind to receive address
-    //
-    if (bind(fd, (struct sockaddr*) &addr, sizeof(addr)) < 0) {
-        perror("bind");
-        return 1;
-    }
-
-    // use setsockopt() to request that the kernel join a multicast group
-    //
-    struct ip_mreq mreq;
-    mreq.imr_multiaddr.s_addr = inet_addr(theGroup);
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-    if (
-        setsockopt(
-            fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char*) &mreq, sizeof(mreq)
-        ) < 0
-    ){
-        perror("setsockopt");
-        return 1;
-    }
-
-    // now just enter a read-print loop
-    //
-    while (1) {
-        int addrlen = sizeof(addr);
-        int nbytes = recvfrom(
-            fd,
-            packet.payload,
-            PACKET_MAX,
-            0,
-            (struct sockaddr *) &addr,
-            &addrlen
-        );
-        if (nbytes < 0) {
-            perror("recvfrom");
-            return 1;
-        }
-        packet.tick=getTicks();
-        if(!firstTick) { firstTick=packet.tick; }
-        packet.tick=packet.tick-firstTick;
-        packet.payloadSz=(unsigned int)nbytes;
-        fwrite(&packet,1,nbytes+8,filer);
-        fprintf(stderr,"t=%u b=%d",packet.tick,packet.payloadSz);
-     }
-
+    fclose(theFile);
 #ifdef _WIN32
     //
     // Program never actually gets here due to infinite loop that has to be
