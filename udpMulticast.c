@@ -43,6 +43,7 @@ unsigned int getTicks() {
 #define MODE_UNK    0
 #define MODE_RECORD 1
 #define MODE_PLAY   2
+#define MODE_SERVE  3
 //
 //  Globals are not great but for a simple app they are so easy to use.
 //
@@ -51,10 +52,11 @@ int theMode=MODE_UNK;       // record or play?
 const char *theFileName=0;  // the input/output filename
 FILE *theFile=0;            // the input/output FILE
 const char *theGroup=0;     // the multicast group
-int thePort=0;              // the multicast port
-const char *theInterface=0; // The interface to use (null for INADDR_ANY or the ip address of adapter)
+int thePortIn=0;            // the multicast port
+int thePortOut=0;           // the outgoing service port
+const char *theInterfaceOut=0; // The output interface to use (null for INADDR_ANY or the ip address of adapter)
 
-const char *modeStrings[3]={"Unknown","Record","Play"};
+const char *modeStrings[4]={"Unknown","Record","Play","Serve"};
 
 typedef struct packetType {
   unsigned int tick;
@@ -76,6 +78,8 @@ void Usage(const char *msg) {
   fprintf(stderr,"     - replay udp stream previously captured from JTECH hdbitt extender)\n\n");
   fprintf(stderr,"  udpMulticast -play   capture.bin 239.255.42.42 5004 -interface 192.168.1.1)\n");
   fprintf(stderr,"     - replay stream as above but to the interface with IP address 192.168.1.1)\n\n");
+  fprintf(stderr,"  udpMulticast -serve   239.255.42.42 5004 -serveon 192.168.1.1 7777)\n");
+  fprintf(stderr,"     - retransmit incoming stream as clients who connect tcp 192.168.1.1:7777)\n\n");
 }
 
 int handleArgs(int argc, char *argv[]) {
@@ -93,45 +97,75 @@ int handleArgs(int argc, char *argv[]) {
   if (!strcmp(argv[1],"-play")) {
     theMode=MODE_PLAY;
   }
+  if (!strcmp(argv[1],"-serve")) {
+    theMode=MODE_SERVE;
+  }
   if(theMode==MODE_UNK) {
-    Usage("Invalid first parameter.  must be '-record' or '-play'");
+    Usage("Invalid first parameter.  must be '-record', '-play', or '-serve'");
     return -1;
   }
 
   // Handle hardcoding interface
   //
-  if(theMode!=MODE_PLAY && argc>5) {
-    Usage("Only play mode supports -interface parameter");
+  if(theMode==MODE_SERVE) {
+    if(argc!=7) {
+      Usage("Serve mode requires 6 arguments");
+      return -1;
+    }
+    if(strcmp(argv[4],"-serveon")) {
+      Usage("Invalid 3rd parameter.  must be '-serveon'");
+      return -1;
+    }
+    theGroup=argv[2]; // e.g., 239.255.255.250 for SSDP
+    thePortIn=atoi(argv[3]); // 0 if error, which is an invalid port
+    theInterfaceOut=argv[5];
+    thePortOut=atoi(argv[6]); // 0 if error, which is an invalid port
+    if(!thePortOut) {
+      sprintf(msg,"Invalid inbound port number '%s'",argv[4]);
+      Usage(msg);
+      return -1;
+    }
+  } 
+  if((theMode==MODE_RECORD || theMode==MODE_UNK) && argc>5) {
+    Usage("Mode does not support this parameter count");
     return -1;
   }
-  if(argc==7 && strcmp(argv[5],"-interface")) {
-    Usage("Invalid 5th parameter.  must be '-interface'");
-    return -1;
-  }
-  if(argc==7) {
-    theInterface=argv[6];
+  if(theMode==MODE_PLAY) {
+    if(argc==7 && strcmp(argv[5],"-interface")) {
+      Usage("Invalid 5th parameter.  must be '-interface'");
+      return -1;
+    }
+    if(argc==7) {
+      theInterfaceOut=argv[6];
+    }
   }
 
-  theFileName=argv[2];  // e.g., record.bin
-  if(theMode==MODE_RECORD) {
-    theFile=fopen(theFileName,"wb");
+  if(theMode!=MODE_SERVE) {
+    theFileName=argv[2];  // e.g., record.bin
+    if(theMode==MODE_RECORD) {
+      theFile=fopen(theFileName,"wb");
+    } else {
+      theFile=fopen(theFileName,"rb");
+    }
+    if(!theFile) {
+      sprintf(msg,"Cannot open file '%s'",theFileName);
+      Usage(msg);
+      return 1;
+    }
+    theGroup=argv[3]; // e.g., 239.255.255.250 for SSDP
+    thePortIn=atoi(argv[4]); // 0 if error, which is an invalid port
+  }
+
+  if(!thePortIn) {
+    sprintf(msg,"Invalid inbound port number '%s'",argv[4]);
+    Usage(msg);
+    return -1;
+  }
+  if(theMode!=MODE_SERVE) {
+    fprintf(stderr,"Lets Go!  %s %s udp://%s:%d interface %s\n",modeStrings[theMode],theFileName,theGroup,thePortIn,theInterfaceOut);
   } else {
-    theFile=fopen(theFileName,"rb");
+    fprintf(stderr,"Lets Go!  %s udp://%s:%d -- serve on tcp://%s:%d\n",modeStrings[theMode],theGroup,thePortIn,theInterfaceOut,thePortOut);
   }
-  if(!theFile) {
-    sprintf(msg,"Cannot open file '%s'",theFileName);
-    Usage(msg);
-    return 1;
-  }
-
-  theGroup=argv[3]; // e.g., 239.255.255.250 for SSDP
-  thePort=atoi(argv[4]); // 0 if error, which is an invalid port
-  if(!thePort) {
-    sprintf(msg,"Invalid port number '%s'",argv[4]);
-    Usage(msg);
-    return -1;
-  }
-  fprintf(stderr,"Lets Go!  %s %s udp://%s:%d\n",modeStrings[theMode],theFileName,theGroup,thePort);
   return 0;
 }
 
@@ -155,7 +189,7 @@ int recorder(int fd) {
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = htonl(INADDR_ANY); // differs from sender
-  addr.sin_port = htons(thePort);
+  addr.sin_port = htons(thePortIn);
 
   // bind to receive address
   //
@@ -194,7 +228,11 @@ int recorder(int fd) {
       if(!firstTick) { firstTick=packet.tick; }
       packet.tick=packet.tick-firstTick;
       packet.payloadSz=(unsigned int)nbytes;
-      fwrite(&packet,1,nbytes+8,theFile);
+      if(theFile) {
+        fwrite(&packet,1,nbytes+8,theFile);
+      } else {
+        fprintf(stderr,"Funnel payload ... bytes=%d\n",nbytes);
+      }
       packetCt++;
       netBytes=netBytes+nbytes;
       if(packetCt%500==1) {
@@ -218,15 +256,16 @@ int player(int fd) {
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_addr.s_addr = inet_addr(theGroup);
-  addr.sin_port = htons(thePort);
+  addr.sin_port = htons(thePortIn);
   
   // 
   // Specific interface for multicast https://stackoverflow.com/questions/9701561/how-to-specify-the-multicast-send-interface-in-python
   //
-  if(theInterface) {
-    unsigned long sa=inet_addr(theInterface);
+  if(theInterfaceOut) {
+    unsigned long sa=inet_addr(theInterfaceOut);
+    int tmp=setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa));
     if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa)) < 0) {
-      perror("setsockopt");
+      fprintf(stderr,"Error initializing custom interface : WinSock Error: %d\n",WSAGetLastError());
       return 1;
     }
   }
@@ -288,6 +327,9 @@ int player(int fd) {
   return 0;
 }
 
+int server(int fd) {
+}
+
 int main(int argc, char *argv[]) {
     char msg[1024];
     int ret=handleArgs(argc,argv);
@@ -314,8 +356,9 @@ int main(int argc, char *argv[]) {
 
     if(theMode==MODE_RECORD) { recorder(fd); }
     if(theMode==MODE_PLAY)   { player(fd);   }
+    if(theMode==MODE_SERVE)  { server(fd);   }
 
-    fclose(theFile);
+    if(theFile) { fclose(theFile); }
 #ifdef _WIN32
     //
     // Program never actually gets here due to infinite loop that has to be
