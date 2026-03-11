@@ -1,5 +1,5 @@
 /*
- * Simple listener.c program for UDP multicast
+ * Multicast [video] UDP multicast stream receiver, transmitter, and unicast adapter
  *
  * Adapted from:
  * https://gist.github.com/hostilefork/f7cae3dc33e7416f2dd25a402857b6c6
@@ -7,8 +7,12 @@
  *
  * Changes:
  *   - Compiles for Windows as well as Linux
- *   - recorder with timing
+ *   - recorder with timing (to facilitate timed playback)
  *   - Record and playback in same app
+ *   - Record and playback in same app
+ *   - Receive multicast and retransmit as unicast
+ *   - Playback recorded file as multicast transmission
+ *   - Playback recorded file as unicast
  */
 
 #ifdef _WIN32
@@ -74,127 +78,61 @@ void Usage(const char *msg) {
   }
   fprintf(logfile,"udpMulticast - a UDP multicast recorder/replayer and unicast converter\n\nUsage:\n\n");
   fprintf(logfile,"  udpMulticast -serve  {group} {port} -serveon {port} {ip} [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}]\n");
-  fprintf(logfile,"  udpMulticast -record {filename} {group} {port}\n");
-  fprintf(logfile,"  udpMulticast -playMulticast {filename} {group} {port} [-interface {ip}]\n");
+  fprintf(logfile,"  udpMulticast -record {group} {port} {filename}\n");
+  fprintf(logfile,"  udpMulticast -playMulticast {group} {port} {filename} [-interface {ip}]\n");
   fprintf(logfile,"  udpMulticast -playUnicast   {filename} -serveon {port} {ip} [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}]\n\n");
   fprintf(logfile,"Examples:\n");
-  fprintf(logfile,"  udpMulticast -serve   239.255.42.42 5004 -serveon 7777 192.168.100.10 192.168.1000.11)\n");
+  fprintf(logfile,"  udpMulticast -serve   239.255.42.42 5004 -serveon 7777 192.168.100.10 192.168.1000.11\n");
   fprintf(logfile,"     - unicast retransmit incoming multicast stream to port 7777 at client ips [up to 8])\n\n");
-  fprintf(logfile,"  udpMulticast -record capture.bin 239.255.42.42 5004)\n");
-  fprintf(logfile,"     - capture udp multicast broadcast stream from selected JTech hdbitt extenders)\n\n");
-  fprintf(logfile,"  udpMulticast -playMulticast capture.bin 239.255.42.42 5004)\n");
-  fprintf(logfile,"     - replay udp stream previously captured from JTECH hdbitt extender via multicast)\n\n");
-  fprintf(logfile,"  udpMulticast -playMulticast capture.bin 239.255.42.42 5004 -interface 192.168.1.1)\n");
-  fprintf(logfile,"     - replay stream as above but to the interface with IP address 192.168.1.1)\n\n");
-  fprintf(logfile,"  udpMulticast -playUnicast  capture.bin -serveon 7777 192.168.100.10 192.168.1000.11)\n");
-  fprintf(logfile,"     - unicast transmit recorded capture.bin to port 7777 at client ips [up to 8])\n\n");
+  fprintf(logfile,"  udpMulticast -record 239.255.42.42 5004 capture.bin\n");
+  fprintf(logfile,"     - capture udp multicast broadcast stream from selected JTech hdbitt extenders\n\n");
+  fprintf(logfile,"  udpMulticast -playMulticast 239.255.42.42 5004 capture.bin\n");
+  fprintf(logfile,"     - replay udp stream previously captured from JTECH hdbitt extender via multicast\n\n");
+  fprintf(logfile,"  udpMulticast -playMulticast 239.255.42.42 5004 capture.bin -interface 192.168.1.1\n");
+  fprintf(logfile,"     - replay stream as above but to the interface with IP address 192.168.1.1\n\n");
+  fprintf(logfile,"  udpMulticast -playUnicast capture.bin -serveon 7777 192.168.100.10 192.168.1000.11\n");
+  fprintf(logfile,"     - unicast transmit recorded capture.bin to port 7777 at client ips [up to 8]\n\n");
 }
 
+//
+// The longest method.  It populates what we want to do based on command line
+// returns -1 on error, 0 on success
+//
 int handleArgs(int argc, char *argv[]) {
   char msg[1024];
 
-  // returns -1 on error, 0 on success
+  // Sanity check arg count for each mode and populate mode. 
   //
-  if (argc < 5) {
-    Usage("Invalid parameter count.  At least four required");
-    return -1;
-  }
+  if (argc < 5)    { Usage("Invalid parameter count.  At least four required");     return -1; }
   if (!strcmp(argv[1],"-record")) {
     theMode=MODE_RECORD;
-    if (argc != 5) {
-      Usage("record mode: Invalid parameter count.  Four required");
-      return -1;
-    }
+    if (argc != 5) { Usage("record mode: Invalid parameter count.  Four required"); return -1; }
   }
   if (!strcmp(argv[1],"-playMulticast")) {
     theMode=MODE_PLAY_MC;
-    if (argc != 5 && argc!=7) {
-      Usage("play multicast mode: Invalid parameter count.  Four or six required");
-      return -1;
-    }
+    if (argc != 5 && argc!=7)                    { Usage("play multicast mode: Invalid param count.  need 4 or 6");   return -1; }
+    if (argc==7 && strcmp(argv[5],"-interface")) { Usage("Invalid 5th parameter.  must be '-interface'");             return -1; }
   }
   if (!strcmp(argv[1],"-playUnicast")) {
     theMode=MODE_PLAY_UC;
-    if (argc <6 || argc>13) {
-      Usage("play unicast mode:  Invalid parameter count.  five to twelve required");
-      return -1;
-    }
+    if (argc <6 || argc>13)         { Usage("play unicast mode:  Invalid parameter count.  five to twelve required"); return -1; }
+    if (strcmp(argv[3],"-serveon")) { Usage("Invalid 2nd parameter.  must be '-serveon'");                            return -1; }
   }
   if (!strcmp(argv[1],"-serve")) {
     theMode=MODE_SERVE;
-    if (argc <7 || argc>14) {
-      Usage("serve mode:  Invalid parameter count.  six to thirteen required");
-      return -1;
-    }
+    if (argc <7 || argc>14)         { Usage("serve mode:  Invalid parameter count.  six to thirteen required");  return -1; }
+    if (strcmp(argv[4],"-serveon")) { Usage("Invalid 3rd parameter.  must be '-serveon'");                       return -1; }
   }
-  if(theMode==MODE_UNK) {
-    Usage("Invalid first parameter.  must be '-record', '-playMulticast', '-playUnicast', or '-serve'");
-    return -1;
-  }
+  if(theMode==MODE_UNK) { Usage("Invalid first parameter.  must be '-record', '-playMulticast', '-playUnicast', or '-serve'"); return -1; }
 
-  if(theMode==MODE_SERVE) {
-    if(strcmp(argv[4],"-serveon")) {
-      Usage("Invalid 3rd parameter.  must be '-serveon'");
-      return -1;
+  // For modes that require a file open and verify file handle
+  //
+  if(theMode==MODE_RECORD || theMode==MODE_PLAY_MC || theMode==MODE_PLAY_UC) {
+    if(theMode==MODE_PLAY_UC) {
+      theFileName=argv[2];   // e.g., record.bin
+    } else {
+      theFileName=argv[4];   // e.g., record.bin
     }
-    theGroup=argv[2]; // e.g., 239.255.255.250 for SSDP
-    thePortIn=atoi(argv[3]); // 0 if error, which is an invalid port
-    if(!thePortIn) {
-      sprintf(msg,"Invalid inbound port number '%s'",argv[3]);
-      Usage(msg);
-      return -1;
-    }
-    thePortOut=atoi(argv[5]); // 0 if error, which is an invalid port
-    if(!thePortOut) {
-      sprintf(msg,"Invalid outbound port number '%s'",argv[5]);
-      Usage(msg);
-      return -1;
-    }
-    theDestIP[0]=argv[6];
-    if(argc>7)  { theDestIP[1]=argv[7];  }
-    if(argc>8)  { theDestIP[2]=argv[8];  }
-    if(argc>9)  { theDestIP[3]=argv[9];  }
-    if(argc>10) { theDestIP[4]=argv[10]; }
-    if(argc>11) { theDestIP[5]=argv[11]; }
-    if(argc>12) { theDestIP[6]=argv[12]; }
-    if(argc>13) { theDestIP[7]=argv[13]; }
-  } 
-
-  if(theMode==MODE_PLAY_UC) {
-    if(strcmp(argv[3],"-serveon")) {
-      Usage("Invalid 2nd parameter.  must be '-serveon'");
-      return -1;
-    }
-    thePortOut=atoi(argv[4]); // 0 if error, which is an invalid port
-    if(!thePortOut) {
-      sprintf(msg,"Invalid outbound port number '%s'",argv[4]);
-      Usage(msg);
-      return -1;
-    }
-    theDestIP[0]=argv[5];
-    if(argc>6)  { theDestIP[1]=argv[6];  }
-    if(argc>7)  { theDestIP[2]=argv[7];  }
-    if(argc>8)  { theDestIP[3]=argv[8];  }
-    if(argc>9)  { theDestIP[4]=argv[9]; }
-    if(argc>10) { theDestIP[5]=argv[10]; }
-    if(argc>11) { theDestIP[6]=argv[11]; }
-    if(argc>12) { theDestIP[7]=argv[12]; }
-  } 
-
-  if(theMode==MODE_PLAY_MC) {
-    // Handle hardcoding interface
-    //
-    if(argc==7 && strcmp(argv[5],"-interface")) {
-      Usage("Invalid 5th parameter.  must be '-interface'");
-      return -1;
-    }
-    if(argc==7) {
-      theInterfaceOut=argv[6];
-    }
-  }
-
-  if(theMode!=MODE_SERVE) {
-    theFileName=argv[2];  // e.g., record.bin
     if(theMode==MODE_RECORD) {
       theFile=fopen(theFileName,"wb");
     } else {
@@ -205,17 +143,56 @@ int handleArgs(int argc, char *argv[]) {
       Usage(msg);
       return 1;
     }
-    theGroup=argv[3]; // e.g., 239.255.255.250 for SSDP
-    thePortIn=thePortOut=atoi(argv[4]); // 0 if error, which is an invalid port
   }
 
-  if(!thePortIn) {
-    sprintf(msg,"Invalid inbound port number '%s'",argv[4]);
-    Usage(msg);
-    return -1;
+  // For modes that require a multicast group parse it
+  //
+  if(theMode==MODE_RECORD || theMode==MODE_PLAY_MC || theMode==MODE_SERVE) {
+    theGroup=argv[2];                   // e.g., 239.255.255.250 for SSDP
+    thePortIn=thePortOut=atoi(argv[3]); // 0 if error, which is an invalid port
+    if(!thePortIn) { sprintf(msg,"Invalid inbound/outbound port number '%s'",argv[3]); Usage(msg); return -1; }
   }
+
+  // Parse serve mode options (overwrites outgoing port number)
+  //
   if(theMode==MODE_SERVE) {
-    fprintf(logfile,"Lets Serve!  %s udp://%s:%d -- serve to port %d on %s",modeStrings[theMode],theGroup,thePortIn,thePortOut,theDestIP[0]);
+    thePortOut=atoi(argv[5]); // 0 if error, which is an invalid port
+    if(!thePortOut) { sprintf(msg,"Invalid serve mode outbound port number '%s'",argv[5]); Usage(msg); return -1; }
+
+    theDestIP[0]=argv[6];
+    if(argc>7)  { theDestIP[1]=argv[7];  }
+    if(argc>8)  { theDestIP[2]=argv[8];  }
+    if(argc>9)  { theDestIP[3]=argv[9];  }
+    if(argc>10) { theDestIP[4]=argv[10]; }
+    if(argc>11) { theDestIP[5]=argv[11]; }
+    if(argc>12) { theDestIP[6]=argv[12]; }
+    if(argc>13) { theDestIP[7]=argv[13]; }
+  } 
+
+  // Parse Unicast play options (similar to serve mode)
+  //
+  if(theMode==MODE_PLAY_UC) {
+    thePortOut=atoi(argv[4]); // 0 if error, which is an invalid port
+    if(!thePortOut) { sprintf(msg,"Invalid outbound port number '%s'",argv[4]); Usage(msg); return -1; }
+
+    theDestIP[0]=argv[5];
+    if(argc>6)  { theDestIP[1]=argv[6];  }
+    if(argc>7)  { theDestIP[2]=argv[7];  }
+    if(argc>8)  { theDestIP[3]=argv[8];  }
+    if(argc>9)  { theDestIP[4]=argv[9]; }
+    if(argc>10) { theDestIP[5]=argv[10]; }
+    if(argc>11) { theDestIP[6]=argv[11]; }
+    if(argc>12) { theDestIP[7]=argv[12]; }
+  } 
+
+  // Parse multicast playback interface hardcoding option
+  //
+  if(theMode==MODE_PLAY_MC && argc==7) { theInterfaceOut=argv[6]; }
+
+  // Print result of parse and return
+  //
+  if(theMode==MODE_SERVE) {
+    fprintf(logfile,"Lets Serve!  %s udp://%s:%d -- serve to port %d at %s",modeStrings[theMode],theGroup,thePortIn,thePortOut,theDestIP[0]);
     if(theDestIP[1])  { fprintf(logfile,", %s",theDestIP[1]);  }
     if(theDestIP[2])  { fprintf(logfile,", %s",theDestIP[2]);  }
     if(theDestIP[3])  { fprintf(logfile,", %s",theDestIP[3]);  }
@@ -225,7 +202,7 @@ int handleArgs(int argc, char *argv[]) {
     if(theDestIP[7])  { fprintf(logfile,", %s",theDestIP[7]);  }
     fprintf(logfile,"\n");
   } else if(theMode==MODE_PLAY_UC) {
-    fprintf(logfile,"Lets Play Unicast!  %s %s -- send to port %d on %s",modeStrings[theMode],theFileName,thePortOut,theDestIP[0]);
+    fprintf(logfile,"Lets Play Unicast!  %s %s -- send to port %d at %s",modeStrings[theMode],theFileName,thePortOut,theDestIP[0]);
     if(theDestIP[1])  { fprintf(logfile,", %s",theDestIP[1]);  }
     if(theDestIP[2])  { fprintf(logfile,", %s",theDestIP[2]);  }
     if(theDestIP[3])  { fprintf(logfile,", %s",theDestIP[3]);  }
@@ -242,10 +219,14 @@ int handleArgs(int argc, char *argv[]) {
     fprintf(logfile,"\n");
   } else {
     fprintf(logfile,"Bad Mode: %d\n",theMode);
+    return -1;
   }
   return 0;
 }
 
+// for unicast output modes "connect" to the destinations.  It is UDP so does not really connect
+// but it makes for more efficient packet sending later via send() vs sendto()
+//
 void serve_setup() {
   int i,ret;
 
@@ -273,6 +254,8 @@ void serve_setup() {
   }
 }
 
+// Receive multicast channel and save it to file or send it back out via unicast
+//
 int recorder(int fd) {
     unsigned int firstTick=0;
     packetType packet;
@@ -355,6 +338,8 @@ int recorder(int fd) {
   return 0;
 }
 
+// Open a previously saved file send it out via unicast or multicast
+//
 int player(int fd) {
   unsigned int tick,firstTick=0;
   packetType packet;
