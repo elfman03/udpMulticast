@@ -312,21 +312,28 @@ int recorder(int fd) {
           perror("recvfrom");
           return 1;
       }
+
+      // note timestamp for recording and/or status logging
+      //
+      packet.tick=getTicks();
+      if(!firstTick) { firstTick=packet.tick; }
+      packet.tick=packet.tick-firstTick;
+
+      // note payload size
+      //
+      packet.payloadSz=(unsigned int)nbytes;
+
       if(theFile) {
         //
-        // Record mode.  Build payload structures out to file
+        // Record mode.  write payload structures out to file
         //
-        packet.tick=getTicks();
-        if(!firstTick) { firstTick=packet.tick; }
-        packet.tick=packet.tick-firstTick;
-        packet.payloadSz=(unsigned int)nbytes;
-        fwrite(&packet,1,nbytes+8,theFile);
+        fwrite(&packet,1,packet.payloadSz+8,theFile);
       } else {
         //
         // Serve mode.  unicast payloads to targets
         //
         for(tgt=0;theDestSock[tgt];tgt++) {
-          send(theDestSock[tgt],packet.payload,nbytes,0);
+          send(theDestSock[tgt],packet.payload,packet.payloadSz,0);
         }
       }
       packetCt++;
@@ -413,7 +420,7 @@ int player(int fd) {
         // Unicast mode.  unicast payloads to targets
         //
         for(tgt=0;theDestSock[tgt];tgt++) {
-          nbytes=send(theDestSock[tgt],packet.payload,nbytes,0);
+          nbytes=send(theDestSock[tgt],packet.payload,packet.payloadSz,0);
           if (nbytes < 0) { perror("sendto"); return 1; }
         }
       }
