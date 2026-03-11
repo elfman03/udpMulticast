@@ -40,23 +40,27 @@ unsigned int getTicks() {
 }
 
 #define PACKET_MAX (65536-8)
-#define MODE_UNK    0
-#define MODE_RECORD 1
-#define MODE_PLAY   2
-#define MODE_SERVE  3
+#define MODE_UNK     0
+#define MODE_RECORD  1
+#define MODE_PLAY_MC 2
+#define MODE_PLAY_UC 3
+#define MODE_SERVE   4
 //
 //  Globals are not great but for a simple app they are so easy to use.
 //
 
-int theMode=MODE_UNK;       // record or play?
+FILE *logfile=0;
+int theMode=MODE_UNK;       // record or play or serve?
 const char *theFileName=0;  // the input/output filename
 FILE *theFile=0;            // the input/output FILE
 const char *theGroup=0;     // the multicast group
 int thePortIn=0;            // the multicast port
 int thePortOut=0;           // the outgoing service port
-const char *theInterfaceOut=0; // The output interface to use (null for INADDR_ANY or the ip address of adapter)
+const char *theInterfaceOut=0; // PLAY MODE - The output interface to use (null for INADDR_ANY or the ip address of adapter)
+const char *theDestIP[8]={0,0,0,0,0,0,0,0}; // SERVE MODE - The destination IP addresses
+int theDestSock[8]={0,0,0,0,0,0,0,0};       // SERVE MODE - The destination connected socket
 
-const char *modeStrings[4]={"Unknown","Record","Play","Serve"};
+const char *modeStrings[5]={"Unknown","Record","PlayMulticast","PlayUnicast","Serve"};
 
 typedef struct packetType {
   unsigned int tick;
@@ -66,20 +70,24 @@ typedef struct packetType {
 
 void Usage(const char *msg) {
   if(msg) {
-    fprintf(stderr,"ERROR: %s\n\n",msg);
+    fprintf(logfile,"ERROR: %s\n\n",msg);
   }
-  fprintf(stderr,"udpMulticast - a UDP multicast recorder/replayer\n\nUsage:\n\n");
-  fprintf(stderr,"  udpMulticast -record {filename} {group} {port}\n");
-  fprintf(stderr,"  udpMulticast -play   {filename} {group} {port} [-interface {ip}]\n\n\n");
-  fprintf(stderr,"Examples:\n");
-  fprintf(stderr,"  udpMulticast -record capture.bin 239.255.42.42 5004)\n");
-  fprintf(stderr,"     - capture udp broadcast stream from selected JTech hdbitt extenders)\n\n");
-  fprintf(stderr,"  udpMulticast -play   capture.bin 239.255.42.42 5004)\n");
-  fprintf(stderr,"     - replay udp stream previously captured from JTECH hdbitt extender)\n\n");
-  fprintf(stderr,"  udpMulticast -play   capture.bin 239.255.42.42 5004 -interface 192.168.1.1)\n");
-  fprintf(stderr,"     - replay stream as above but to the interface with IP address 192.168.1.1)\n\n");
-  fprintf(stderr,"  udpMulticast -serve   239.255.42.42 5004 -serveon 192.168.1.1 7777)\n");
-  fprintf(stderr,"     - retransmit incoming stream as clients who connect tcp 192.168.1.1:7777)\n\n");
+  fprintf(logfile,"udpMulticast - a UDP multicast recorder/replayer and unicast converter\n\nUsage:\n\n");
+  fprintf(logfile,"  udpMulticast -serve  {group} {port} -serveon {port} {ip} [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}]\n");
+  fprintf(logfile,"  udpMulticast -record {filename} {group} {port}\n");
+  fprintf(logfile,"  udpMulticast -playMulticast {filename} {group} {port} [-interface {ip}]\n");
+  fprintf(logfile,"  udpMulticast -playUnicast   {filename} -serveon {port} {ip} [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}]\n\n");
+  fprintf(logfile,"Examples:\n");
+  fprintf(logfile,"  udpMulticast -serve   239.255.42.42 5004 -serveon 7777 192.168.100.10 192.168.1000.11)\n");
+  fprintf(logfile,"     - unicast retransmit incoming multicast stream to port 7777 at client ips [up to 8])\n\n");
+  fprintf(logfile,"  udpMulticast -record capture.bin 239.255.42.42 5004)\n");
+  fprintf(logfile,"     - capture udp multicast broadcast stream from selected JTech hdbitt extenders)\n\n");
+  fprintf(logfile,"  udpMulticast -playMulticast capture.bin 239.255.42.42 5004)\n");
+  fprintf(logfile,"     - replay udp stream previously captured from JTECH hdbitt extender via multicast)\n\n");
+  fprintf(logfile,"  udpMulticast -playMulticast capture.bin 239.255.42.42 5004 -interface 192.168.1.1)\n");
+  fprintf(logfile,"     - replay stream as above but to the interface with IP address 192.168.1.1)\n\n");
+  fprintf(logfile,"  udpMulticast -playUnicast  capture.bin -serveon 7777 192.168.100.10 192.168.1000.11)\n");
+  fprintf(logfile,"     - unicast transmit recorded capture.bin to port 7777 at client ips [up to 8])\n\n");
 }
 
 int handleArgs(int argc, char *argv[]) {
@@ -87,50 +95,95 @@ int handleArgs(int argc, char *argv[]) {
 
   // returns -1 on error, 0 on success
   //
-  if (argc != 5 && argc!=7) {
-    Usage("Invalid parameter count.  Four or six required");
+  if (argc < 5) {
+    Usage("Invalid parameter count.  At least four required");
     return -1;
   }
   if (!strcmp(argv[1],"-record")) {
     theMode=MODE_RECORD;
+    if (argc != 5) {
+      Usage("record mode: Invalid parameter count.  Four required");
+      return -1;
+    }
   }
-  if (!strcmp(argv[1],"-play")) {
-    theMode=MODE_PLAY;
+  if (!strcmp(argv[1],"-playMulticast")) {
+    theMode=MODE_PLAY_MC;
+    if (argc != 5 && argc!=7) {
+      Usage("play multicast mode: Invalid parameter count.  Four or six required");
+      return -1;
+    }
+  }
+  if (!strcmp(argv[1],"-playUnicast")) {
+    theMode=MODE_PLAY_UC;
+    if (argc <6 || argc>13) {
+      Usage("play unicast mode:  Invalid parameter count.  five to twelve required");
+      return -1;
+    }
   }
   if (!strcmp(argv[1],"-serve")) {
     theMode=MODE_SERVE;
+    if (argc <7 || argc>14) {
+      Usage("serve mode:  Invalid parameter count.  six to thirteen required");
+      return -1;
+    }
   }
   if(theMode==MODE_UNK) {
-    Usage("Invalid first parameter.  must be '-record', '-play', or '-serve'");
+    Usage("Invalid first parameter.  must be '-record', '-playMulticast', '-playUnicast', or '-serve'");
     return -1;
   }
 
-  // Handle hardcoding interface
-  //
   if(theMode==MODE_SERVE) {
-    if(argc!=7) {
-      Usage("Serve mode requires 6 arguments");
-      return -1;
-    }
     if(strcmp(argv[4],"-serveon")) {
       Usage("Invalid 3rd parameter.  must be '-serveon'");
       return -1;
     }
     theGroup=argv[2]; // e.g., 239.255.255.250 for SSDP
     thePortIn=atoi(argv[3]); // 0 if error, which is an invalid port
-    theInterfaceOut=argv[5];
-    thePortOut=atoi(argv[6]); // 0 if error, which is an invalid port
-    if(!thePortOut) {
-      sprintf(msg,"Invalid inbound port number '%s'",argv[4]);
+    if(!thePortIn) {
+      sprintf(msg,"Invalid inbound port number '%s'",argv[3]);
       Usage(msg);
       return -1;
     }
+    thePortOut=atoi(argv[5]); // 0 if error, which is an invalid port
+    if(!thePortOut) {
+      sprintf(msg,"Invalid outbound port number '%s'",argv[5]);
+      Usage(msg);
+      return -1;
+    }
+    theDestIP[0]=argv[6];
+    if(argc>7)  { theDestIP[1]=argv[7];  }
+    if(argc>8)  { theDestIP[2]=argv[8];  }
+    if(argc>9)  { theDestIP[3]=argv[9];  }
+    if(argc>10) { theDestIP[4]=argv[10]; }
+    if(argc>11) { theDestIP[5]=argv[11]; }
+    if(argc>12) { theDestIP[6]=argv[12]; }
+    if(argc>13) { theDestIP[7]=argv[13]; }
   } 
-  if((theMode==MODE_RECORD || theMode==MODE_UNK) && argc>5) {
-    Usage("Mode does not support this parameter count");
-    return -1;
-  }
-  if(theMode==MODE_PLAY) {
+
+  if(theMode==MODE_PLAY_UC) {
+    if(strcmp(argv[3],"-serveon")) {
+      Usage("Invalid 2nd parameter.  must be '-serveon'");
+      return -1;
+    }
+    thePortOut=atoi(argv[4]); // 0 if error, which is an invalid port
+    if(!thePortOut) {
+      sprintf(msg,"Invalid outbound port number '%s'",argv[4]);
+      Usage(msg);
+      return -1;
+    }
+    theDestIP[0]=argv[5];
+    if(argc>6)  { theDestIP[1]=argv[6];  }
+    if(argc>7)  { theDestIP[2]=argv[7];  }
+    if(argc>8)  { theDestIP[3]=argv[8];  }
+    if(argc>9)  { theDestIP[4]=argv[9]; }
+    if(argc>10) { theDestIP[5]=argv[10]; }
+    if(argc>11) { theDestIP[6]=argv[11]; }
+    if(argc>12) { theDestIP[7]=argv[12]; }
+  } 
+
+  if(theMode==MODE_PLAY_MC) {
+    // Handle hardcoding interface
+    //
     if(argc==7 && strcmp(argv[5],"-interface")) {
       Usage("Invalid 5th parameter.  must be '-interface'");
       return -1;
@@ -153,7 +206,7 @@ int handleArgs(int argc, char *argv[]) {
       return 1;
     }
     theGroup=argv[3]; // e.g., 239.255.255.250 for SSDP
-    thePortIn=atoi(argv[4]); // 0 if error, which is an invalid port
+    thePortIn=thePortOut=atoi(argv[4]); // 0 if error, which is an invalid port
   }
 
   if(!thePortIn) {
@@ -161,17 +214,69 @@ int handleArgs(int argc, char *argv[]) {
     Usage(msg);
     return -1;
   }
-  if(theMode!=MODE_SERVE) {
-    fprintf(stderr,"Lets Go!  %s %s udp://%s:%d interface %s\n",modeStrings[theMode],theFileName,theGroup,thePortIn,theInterfaceOut);
+  if(theMode==MODE_SERVE) {
+    fprintf(logfile,"Lets Serve!  %s udp://%s:%d -- serve to port %d on %s",modeStrings[theMode],theGroup,thePortIn,thePortOut,theDestIP[0]);
+    if(theDestIP[1])  { fprintf(logfile,", %s",theDestIP[1]);  }
+    if(theDestIP[2])  { fprintf(logfile,", %s",theDestIP[2]);  }
+    if(theDestIP[3])  { fprintf(logfile,", %s",theDestIP[3]);  }
+    if(theDestIP[4])  { fprintf(logfile,", %s",theDestIP[4]);  }
+    if(theDestIP[5])  { fprintf(logfile,", %s",theDestIP[5]);  }
+    if(theDestIP[6])  { fprintf(logfile,", %s",theDestIP[6]);  }
+    if(theDestIP[7])  { fprintf(logfile,", %s",theDestIP[7]);  }
+    fprintf(logfile,"\n");
+  } else if(theMode==MODE_PLAY_UC) {
+    fprintf(logfile,"Lets Play Unicast!  %s %s -- send to port %d on %s",modeStrings[theMode],theFileName,thePortOut,theDestIP[0]);
+    if(theDestIP[1])  { fprintf(logfile,", %s",theDestIP[1]);  }
+    if(theDestIP[2])  { fprintf(logfile,", %s",theDestIP[2]);  }
+    if(theDestIP[3])  { fprintf(logfile,", %s",theDestIP[3]);  }
+    if(theDestIP[4])  { fprintf(logfile,", %s",theDestIP[4]);  }
+    if(theDestIP[5])  { fprintf(logfile,", %s",theDestIP[5]);  }
+    if(theDestIP[6])  { fprintf(logfile,", %s",theDestIP[6]);  }
+    if(theDestIP[7])  { fprintf(logfile,", %s",theDestIP[7]);  }
+    fprintf(logfile,"\n");
+  } else if(theMode==MODE_RECORD) {
+    fprintf(logfile,"Lets Record!  %s %s udp://%s:%d\n",modeStrings[theMode],theFileName,theGroup,thePortIn);
+  } else if(theMode==MODE_PLAY_MC) {
+    fprintf(logfile,"Lets Play!  %s %s udp://%s:%d",modeStrings[theMode],theFileName,theGroup,thePortOut);
+    if(theInterfaceOut) { fprintf(logfile," interface %s",theInterfaceOut); }
+    fprintf(logfile,"\n");
   } else {
-    fprintf(stderr,"Lets Go!  %s udp://%s:%d -- serve on tcp://%s:%d\n",modeStrings[theMode],theGroup,thePortIn,theInterfaceOut,thePortOut);
+    fprintf(logfile,"Bad Mode: %d\n",theMode);
   }
   return 0;
+}
+
+void serve_setup() {
+  int i,ret;
+
+  // set up destination addresses
+  //
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(thePortOut);
+
+  // loop thru ip strings
+  //
+  for(i=0;theDestIP[i];i++) {
+    addr.sin_addr.s_addr = inet_addr(theDestIP[i]);                       // set IP
+    theDestSock[i]=socket(AF_INET, SOCK_DGRAM, 0);                        // create socket
+    ret=connect(theDestSock[i], (struct sockaddr *)&addr, sizeof(addr));  // connect
+    fprintf(logfile,"Connect %s status %d\n",theDestIP[i],ret);           // report
+
+    // error handle
+    //
+    if(ret<0) {
+      fprintf(logfile,"FATAL!  ERROR CONNECTING\n");
+      _exit(-1);
+    }
+  }
 }
 
 int recorder(int fd) {
     unsigned int firstTick=0;
     packetType packet;
+    int tgt;
     int packetCt=0;
     int netBytes=0;
 
@@ -224,19 +329,27 @@ int recorder(int fd) {
           perror("recvfrom");
           return 1;
       }
-      packet.tick=getTicks();
-      if(!firstTick) { firstTick=packet.tick; }
-      packet.tick=packet.tick-firstTick;
-      packet.payloadSz=(unsigned int)nbytes;
       if(theFile) {
+        //
+        // Record mode.  Build payload structures out to file
+        //
+        packet.tick=getTicks();
+        if(!firstTick) { firstTick=packet.tick; }
+        packet.tick=packet.tick-firstTick;
+        packet.payloadSz=(unsigned int)nbytes;
         fwrite(&packet,1,nbytes+8,theFile);
       } else {
-        fprintf(stderr,"Funnel payload ... bytes=%d\n",nbytes);
+        //
+        // Serve mode.  unicast payloads to targets
+        //
+        for(tgt=0;theDestSock[tgt];tgt++) {
+          send(theDestSock[tgt],packet.payload,nbytes,0);
+        }
       }
       packetCt++;
       netBytes=netBytes+nbytes;
       if(packetCt%500==1) {
-        fprintf(stderr,"t=%u ct=%d netb=%d b=%d\n",packet.tick,packetCt,netBytes,packet.payloadSz);
+        fprintf(logfile,"t=%u ct=%d netb=%d b=%d\n",packet.tick,packetCt,netBytes,packet.payloadSz);
       }
   }
   return 0;
@@ -249,24 +362,27 @@ int player(int fd) {
   int dataPacketCt=0;
   int zeroPacketCt=0;
   int netBytes=0;
+  int tgt,nbytes;
+  struct sockaddr_in addrMC;
 
-  // set up destination address
-  //
-  struct sockaddr_in addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = inet_addr(theGroup);
-  addr.sin_port = htons(thePortIn);
+  if(theMode==MODE_PLAY_MC) {
+    // set up destination address
+    //
+    memset(&addrMC, 0, sizeof(addrMC));
+    addrMC.sin_family = AF_INET;
+    addrMC.sin_addr.s_addr = inet_addr(theGroup);
+    addrMC.sin_port = htons(thePortOut);
   
-  // 
-  // Specific interface for multicast https://stackoverflow.com/questions/9701561/how-to-specify-the-multicast-send-interface-in-python
-  //
-  if(theInterfaceOut) {
-    unsigned long sa=inet_addr(theInterfaceOut);
-    int tmp=setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa));
-    if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa)) < 0) {
-      fprintf(stderr,"Error initializing custom interface : WinSock Error: %d\n",WSAGetLastError());
-      return 1;
+    // 
+    // Specific interface for multicast https://stackoverflow.com/questions/9701561/how-to-specify-the-multicast-send-interface-in-python
+    //
+    if(theInterfaceOut) {
+      unsigned long sa=inet_addr(theInterfaceOut);
+      int tmp=setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa));
+      if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa)) < 0) {
+        fprintf(logfile,"Error initializing custom interface : WinSock Error: %d\n",WSAGetLastError());
+        return 1;
+      }
     }
   }
 
@@ -298,17 +414,23 @@ int player(int fd) {
 
       // It is time.  Lets send it
       //
-      int nbytes = sendto(
-         fd,
-         packet.payload,
-         packet.payloadSz,
-         0,
-         (struct sockaddr*) &addr,
-         sizeof(addr)
-      );
-      if (nbytes < 0) {
-         perror("sendto");
-         return 1;
+      if(theMode==MODE_PLAY_MC) {
+        //
+        // Multicast Mode
+        //
+        nbytes = sendto(fd, packet.payload, packet.payloadSz, 0, (struct sockaddr*) &addrMC, sizeof(addrMC));
+        if (nbytes < 0) {
+          perror("sendto");
+          return 1;
+        }
+      } else {
+        //
+        // Unicast mode.  unicast payloads to targets
+        //
+        for(tgt=0;theDestSock[tgt];tgt++) {
+          nbytes=send(theDestSock[tgt],packet.payload,nbytes,0);
+          if (nbytes < 0) { perror("sendto"); return 1; }
+        }
       }
       dataPacketCt++;
       netBytes=netBytes+packet.payloadSz;
@@ -317,21 +439,19 @@ int player(int fd) {
     }
     packetCt++;
     if(packetCt%500==1) {
-      fprintf(stderr,"t=%u dct=%d zct=%d netb=%dd\n",packet.tick,dataPacketCt,zeroPacketCt,netBytes);
+      fprintf(logfile,"t=%u dct=%d zct=%d netb=%dd\n",packet.tick,dataPacketCt,zeroPacketCt,netBytes);
     }
 
     // read next header
     fread(&packet,1,8,theFile);
   }
-  fprintf(stderr,"EOF.  Wrote %d bytes from %d data packets. skipped %d zero packets\n",netBytes,packetCt,zeroPacketCt);
+  fprintf(logfile,"EOF.  Wrote %d bytes from %d data packets. skipped %d zero packets\n",netBytes,packetCt,zeroPacketCt);
   return 0;
-}
-
-int server(int fd) {
 }
 
 int main(int argc, char *argv[]) {
     char msg[1024];
+    logfile=stderr;
     int ret=handleArgs(argc,argv);
     if(ret) { return ret; }
 
@@ -354,9 +474,10 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    if(theMode==MODE_RECORD) { recorder(fd); }
-    if(theMode==MODE_PLAY)   { player(fd);   }
-    if(theMode==MODE_SERVE)  { server(fd);   }
+    if(theMode==MODE_RECORD)  { recorder(fd); }
+    if(theMode==MODE_PLAY_MC) { player(fd);   }
+    if(theMode==MODE_PLAY_UC) { serve_setup(); player(fd);   }
+    if(theMode==MODE_SERVE)   { serve_setup(); recorder(fd); }
 
     if(theFile) { fclose(theFile); }
 #ifdef _WIN32
