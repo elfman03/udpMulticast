@@ -1,6 +1,11 @@
 OPTS=/MD /EHsc /Zi
 ELIBS=ws2_32.lib mswsock.lib advapi32.lib
 
+#
+# Use existance of PROGRAMFILES environment variable to determine windows
+#
+ifdef PROGRAMFILES
+WINDOWS=1
 udpMulticast.exe: udpMulticast.c
 	cl udpMulticast.c /link $(ELIBS)
 
@@ -21,4 +26,31 @@ test_play2:
 
 test_play3:
 	./udpMulticast.exe -playMulticast 239.255.42.42 5004 capture.bin -interface 192.168.1.108
+
+else
+
+WINDOWS=0
+
+udpMulticast: udpMulticast.c
+	gcc -o udpMulticast udpMulticast.c 
+
+clean:
+	rm udpMulticast
+
+test:
+	./udpMulticast -serve 239.255.42.42 5004 -serveon 7777 192.168.1.1 192.168.1.2
+
+test_record: 
+	./udpMulticast -record 239.255.42.42 5004 capture.bin
+
+test_play:
+	./udpMulticast -playUnicast capture.bin -serveon 7777 192.168.1.1 192.168.1.2
+
+test_play2:
+	./udpMulticast -playMulticast 239.255.42.42 5004 capture.bin
+
+test_play3:
+	./udpMulticast -playMulticast 239.255.42.42 5004 capture.bin -interface 192.168.1.108
+endif
+
 

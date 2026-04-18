@@ -20,6 +20,8 @@
     #include <Ws2tcpip.h> // needed for ip_mreq definition for multicast
     #include <Windows.h>
 #else
+    #include <unistd.h>
+    #include <errno.h>
     #include <sys/types.h>
     #include <sys/socket.h>
     #include <netinet/in.h>
@@ -37,7 +39,9 @@ unsigned int getTicks() {
 #ifdef _WIN32
   ret=(unsigned int)GetTickCount();
 #else
-  TODO.  PUT IN SOME LINUX MILLISECOND COLLECTION HERE
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC,&ts);  // TODO error handling?
+  ret=(unsigned int) (ts.tv_sec*1000)+(ts.tv_nsec/1000);
 #endif
 
   return ret;
@@ -372,7 +376,11 @@ int player(int fd) {
       unsigned long sa=inet_addr(theInterfaceOut);
       int tmp=setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa));
       if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, (char*) &sa, sizeof(sa)) < 0) {
+#ifdef _WIN32
         fprintf(logfile,"Error initializing custom interface : WinSock Error: %d\n",WSAGetLastError());
+#else
+        fprintf(logfile,"Error initializing custom interface : Errno Error: %d\n",errno);
+#endif
         return 1;
       }
     }
@@ -400,7 +408,7 @@ int player(int fd) {
 #ifdef _WIN32
         Sleep(packet.tick - toffset);
 #else
-        TODO.  PUT IN SOME LINUX MILLISECOND USLEEP HERE
+        usleep((packet.tick-toffset)*1000);
 #endif
       }
 
