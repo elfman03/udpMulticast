@@ -1,5 +1,5 @@
 #!/bin/sh
 
 while [ 1 ] ; do
-  /root/udpMulticast/udpMulticast -playUnicast /root/udpMulticast/capture.bin -serveon 7777 192.168.20.10 192.168.20.11 192.168.20.125
+  /usr/local/udpMulticast/udpMulticast -playUnicast /usr/local/udpMulticast/capture.bin -serveon 7777 192.168.77.10 192.168.77.11 192.168.77.125
 done
