@@ -44,7 +44,7 @@ test_record:
 	./udpMulticast -record 239.255.42.42 5004 capture.bin
 
 test_play:
-	./udpMulticast -playUnicast capture.bin -serveon 7777 192.168.1.1 192.168.1.2
+	./udpMulticast -playUnicast capture.bin -serveon 7777 192.168.20.10 192.168.20.11 192.168.20.125
 
 test_play2:
 	./udpMulticast -playMulticast 239.255.42.42 5004 capture.bin

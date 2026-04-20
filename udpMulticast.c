@@ -41,7 +41,7 @@ unsigned int getTicks() {
 #else
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC,&ts);  // TODO error handling?
-  ret=(unsigned int) (ts.tv_sec*1000)+(ts.tv_nsec/1000);
+  ret=(unsigned int) (ts.tv_sec*1000)+(ts.tv_nsec/1000000);
 #endif
 
   return ret;
@@ -408,6 +408,7 @@ int player(int fd) {
 #ifdef _WIN32
         Sleep(packet.tick - toffset);
 #else
+        //fprintf(stderr,"usleep packet_tick=%d mytick=%d (%d-%d) diff=%d\n",packet.tick,toffset,tick,firstTick,packet.tick-toffset);
         usleep((packet.tick-toffset)*1000);
 #endif
       }
