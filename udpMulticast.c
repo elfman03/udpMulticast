@@ -48,11 +48,13 @@ unsigned int getTicks() {
 }
 
 #define PACKET_MAX (65536-8)
-#define MODE_UNK     0
-#define MODE_RECORD  1
-#define MODE_PLAY_MC 2
-#define MODE_PLAY_UC 3
-#define MODE_SERVE   4
+#define MODE_UNK      0
+#define MODE_RECORD   1
+#define MODE_PLAY_MC  2  // multicast
+#define MODE_PLAY_UC  3  // unicast
+#define MODE_PLAY_BC  4  // broadcast (e.g., 192.168.1.255)
+#define MODE_SERVE    5
+#define MODE_SERVE_BC 6 // serve with broadcasts
 //
 //  Globals are not great but for a simple app they are so easy to use.
 //
@@ -67,8 +69,9 @@ int thePortOut=0;           // the outgoing service port
 const char *theInterfaceOut=0; // PLAY MODE - The output interface to use (null for INADDR_ANY or the ip address of adapter)
 const char *theDestIP[8]={0,0,0,0,0,0,0,0}; // SERVE MODE - The destination IP addresses
 int theDestSock[8]={0,0,0,0,0,0,0,0};       // SERVE MODE - The destination connected socket
+struct sockaddr_in bcDest;
 
-const char *modeStrings[5]={"Unknown","Record","PlayMulticast","PlayUnicast","Serve"};
+const char *modeStrings[7]={"Unknown","Record","PlayMulticast","PlayUnicast","PlayBroadcast","Serve","ServeBroadcast"};
 
 typedef struct packetType {
   unsigned int tick;
@@ -82,9 +85,11 @@ void Usage(const char *msg) {
   }
   fprintf(logfile,"udpMulticast - a UDP multicast recorder/replayer and unicast converter\n\nUsage:\n\n");
   fprintf(logfile,"  udpMulticast -serve  {group} {port} -serveon {port} {ip} [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}]\n");
+  fprintf(logfile,"  udpMulticast -serveBC  {group} {port} -serveon {port} {ip}\n");
   fprintf(logfile,"  udpMulticast -record {group} {port} {filename}\n");
   fprintf(logfile,"  udpMulticast -playMulticast {group} {port} {filename} [-interface {ip}]\n");
   fprintf(logfile,"  udpMulticast -playUnicast   {filename} -serveon {port} {ip} [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}] [{ip}]\n\n");
+  fprintf(logfile,"  udpMulticast -playBroadcast {filename} -serveon {port} {ip}\n\n");
   fprintf(logfile,"Examples:\n");
   fprintf(logfile,"  udpMulticast -serve   239.255.42.42 5004 -serveon 7777 192.168.100.10 192.168.1000.11\n");
   fprintf(logfile,"     - unicast retransmit incoming multicast stream to port 7777 at client ips [up to 8])\n\n");
@@ -122,6 +127,16 @@ int handleArgs(int argc, char *argv[]) {
     if (argc <6 || argc>13)         { Usage("play unicast mode:  Invalid parameter count.  five to twelve required"); return -1; }
     if (strcmp(argv[3],"-serveon")) { Usage("Invalid 2nd parameter.  must be '-serveon'");                            return -1; }
   }
+  if (!strcmp(argv[1],"-playBroadcast")) {
+    theMode=MODE_PLAY_BC;
+    if (argc !=6)         { Usage("play broadcast mode:  Invalid parameter count.  six required"); return -1; }
+    if (strcmp(argv[3],"-serveon")) { Usage("Invalid 2nd parameter.  must be '-serveon'");                            return -1; }
+  }
+  if (!strcmp(argv[1],"-serveBC")) {
+    theMode=MODE_SERVE_BC;
+    if (argc !=7)         { Usage("serveBC mode:  Invalid parameter count.  6 required");  return -1; }
+    if (strcmp(argv[4],"-serveon")) { Usage("Invalid 3rd parameter.  must be '-serveon'");                       return -1; }
+  }
   if (!strcmp(argv[1],"-serve")) {
     theMode=MODE_SERVE;
     if (argc <7 || argc>14)         { Usage("serve mode:  Invalid parameter count.  six to thirteen required");  return -1; }
@@ -131,8 +146,8 @@ int handleArgs(int argc, char *argv[]) {
 
   // For modes that require a file open and verify file handle
   //
-  if(theMode==MODE_RECORD || theMode==MODE_PLAY_MC || theMode==MODE_PLAY_UC) {
-    if(theMode==MODE_PLAY_UC) {
+  if(theMode==MODE_RECORD || theMode==MODE_PLAY_MC || theMode==MODE_PLAY_UC || theMode==MODE_PLAY_BC) {
+    if(theMode==MODE_PLAY_UC || theMode==MODE_PLAY_BC) {
       theFileName=argv[2];   // e.g., record.bin
     } else {
       theFileName=argv[4];   // e.g., record.bin
@@ -151,7 +166,7 @@ int handleArgs(int argc, char *argv[]) {
 
   // For modes that require a multicast group parse it
   //
-  if(theMode==MODE_RECORD || theMode==MODE_PLAY_MC || theMode==MODE_SERVE) {
+  if(theMode==MODE_RECORD || theMode==MODE_PLAY_MC || theMode==MODE_SERVE || theMode==MODE_SERVE_BC) {
     theGroup=argv[2];                   // e.g., 239.255.255.250 for SSDP
     thePortIn=thePortOut=atoi(argv[3]); // 0 if error, which is an invalid port
     if(!thePortIn) { sprintf(msg,"Invalid inbound/outbound port number '%s'",argv[3]); Usage(msg); return -1; }
@@ -172,6 +187,24 @@ int handleArgs(int argc, char *argv[]) {
     if(argc>12) { theDestIP[6]=argv[12]; }
     if(argc>13) { theDestIP[7]=argv[13]; }
   } 
+
+  // Parse Broadcast play options
+  //
+  if(theMode==MODE_SERVE_BC) {
+    thePortOut=atoi(argv[5]); // 0 if error, which is an invalid port
+    if(!thePortOut) { sprintf(msg,"Invalid outbound port number '%s'",argv[5]); Usage(msg); return -1; }
+    theDestIP[0]=argv[6];
+    theDestIP[1]=0;
+  }
+
+  // Parse Broadcast play options
+  //
+  if(theMode==MODE_PLAY_BC) {
+    thePortOut=atoi(argv[4]); // 0 if error, which is an invalid port
+    if(!thePortOut) { sprintf(msg,"Invalid outbound port number '%s'",argv[4]); Usage(msg); return -1; }
+    theDestIP[0]=argv[5];
+    theDestIP[1]=0;
+  }
 
   // Parse Unicast play options (similar to serve mode)
   //
@@ -215,6 +248,8 @@ int handleArgs(int argc, char *argv[]) {
     if(theDestIP[6])  { fprintf(logfile,", %s",theDestIP[6]);  }
     if(theDestIP[7])  { fprintf(logfile,", %s",theDestIP[7]);  }
     fprintf(logfile,"\n");
+  } else if(theMode==MODE_PLAY_BC) {
+    fprintf(logfile,"Lets Play Broadcast!  %s %s -- send to port %d at %s\n",modeStrings[theMode],theFileName,thePortOut,theDestIP[0]);
   } else if(theMode==MODE_RECORD) {
     fprintf(logfile,"Lets Record!  %s %s udp://%s:%d\n",modeStrings[theMode],theFileName,theGroup,thePortIn);
   } else if(theMode==MODE_PLAY_MC) {
@@ -241,19 +276,33 @@ void serve_setup() {
   addr.sin_family = AF_INET;
   addr.sin_port = htons(thePortOut);
 
-  // loop thru ip strings
   //
-  for(i=0;theDestIP[i];i++) {
-    addr.sin_addr.s_addr = inet_addr(theDestIP[i]);                       // set IP
-    theDestSock[i]=socket(AF_INET, SOCK_DGRAM, 0);                        // create socket
-    ret=connect(theDestSock[i], (struct sockaddr *)&addr, sizeof(addr));  // connect
-    fprintf(logfile,"Connect %s status %d\n",theDestIP[i],ret);           // report
-
-    // error handle
+  // If in broadcast mode will use sendto and do not need connect.
+  //
+  if(theMode==MODE_PLAY_BC || theMode==MODE_SERVE_BC) {
+    int one=1;
+    theDestSock[0]=socket(AF_INET, SOCK_DGRAM, 0);                        // create socket
+    setsockopt(theDestSock[0], SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+    memset(&bcDest,0,sizeof(bcDest));
+    bcDest.sin_family = AF_INET;
+    bcDest.sin_port = htons(thePortOut);
+    bcDest.sin_addr.s_addr = inet_addr(theDestIP[0]);
+  } else {
     //
-    if(ret<0) {
-      fprintf(logfile,"FATAL!  ERROR CONNECTING\n");
-      _exit(-1);
+    // loop thru ip strings
+    //
+    for(i=0;theDestIP[i];i++) {
+      addr.sin_addr.s_addr = inet_addr(theDestIP[i]);                       // set IP
+      theDestSock[i]=socket(AF_INET, SOCK_DGRAM, 0);                        // create socket
+      ret=connect(theDestSock[i], (struct sockaddr *)&addr, sizeof(addr));  // connect
+      fprintf(logfile,"Connect %s status %d\n",theDestIP[i],ret);           // report
+
+      // error handle
+      //
+      if(ret<0) {
+        fprintf(logfile,"FATAL!  ERROR CONNECTING\n");
+        _exit(-1);
+      }
     }
   }
 }
@@ -296,7 +345,7 @@ int recorder(int fd) {
   mreq.imr_multiaddr.s_addr = inet_addr(theGroup);
   mreq.imr_interface.s_addr = htonl(INADDR_ANY);
   if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, (char*) &mreq, sizeof(mreq)) < 0) {
-      perror("setsockopt");
+      perror("setsockopt - join-multicast");
       return 1;
   }
 
@@ -334,10 +383,15 @@ int recorder(int fd) {
         fwrite(&packet,1,packet.payloadSz+8,theFile);
       } else {
         //
-        // Serve mode.  unicast payloads to targets
+        // Serve mode.  unicast payloads to targets via sendto if one target and send if more
         //
-        for(tgt=0;theDestSock[tgt];tgt++) {
-          send(theDestSock[tgt],packet.payload,packet.payloadSz,0);
+        if(theMode!=MODE_SERVE_BC) {
+          for(tgt=0;theDestSock[tgt];tgt++) {
+            send(theDestSock[tgt],packet.payload,packet.payloadSz,0);
+            //perror("send");
+          }
+        } else {
+          sendto(theDestSock[0],packet.payload,packet.payloadSz,0,(struct sockaddr*)&bcDest,sizeof(bcDest));
         }
       }
       packetCt++;
@@ -426,10 +480,15 @@ int player(int fd) {
         }
       } else {
         //
-        // Unicast mode.  unicast payloads to targets
+        // Unicast or broadcast mode.  unicast payloads to targets or sendto broadcast
         //
-        for(tgt=0;theDestSock[tgt];tgt++) {
-          nbytes=send(theDestSock[tgt],packet.payload,packet.payloadSz,0);
+        if(theMode!=MODE_PLAY_BC) {
+          for(tgt=0;theDestSock[tgt];tgt++) {
+            nbytes=send(theDestSock[tgt],packet.payload,packet.payloadSz,0);
+            //if (nbytes < 0) { perror("send"); return 1; }
+          }
+        } else {
+          nbytes=sendto(theDestSock[0],packet.payload,packet.payloadSz,0,(struct sockaddr*)&bcDest,sizeof(bcDest));
           if (nbytes < 0) { perror("sendto"); return 1; }
         }
       }
@@ -477,8 +536,8 @@ int main(int argc, char *argv[]) {
 
     if(theMode==MODE_RECORD)  { recorder(fd); }
     if(theMode==MODE_PLAY_MC) { player(fd);   }
-    if(theMode==MODE_PLAY_UC) { serve_setup(); player(fd);   }
-    if(theMode==MODE_SERVE)   { serve_setup(); recorder(fd); }
+    if(theMode==MODE_PLAY_UC || theMode==MODE_PLAY_BC) { serve_setup(); player(fd);   }
+    if(theMode==MODE_SERVE   || theMode==MODE_SERVE_BC){ serve_setup(); recorder(fd); }
 
     if(theFile) { fclose(theFile); }
 #ifdef _WIN32
