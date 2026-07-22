@@ -68,8 +68,9 @@ int thePortIn=0;            // the multicast port
 int thePortOut=0;           // the outgoing service port
 const char *theInterfaceOut=0; // PLAY MODE - The output interface to use (null for INADDR_ANY or the ip address of adapter)
 const char *theDestIP[8]={0,0,0,0,0,0,0,0}; // SERVE MODE - The destination IP addresses
-int theDestSock[8]={0,0,0,0,0,0,0,0};       // SERVE MODE - The destination connected socket
-struct sockaddr_in bcDest;
+int theDestSock[8]={0,0,0,0,0,0,0,0};       // SERVE MODE - The destination sendto socket
+struct sockaddr_in bcDest;                  // broadcast destination encoded ip
+struct sockaddr_in ucDest[8];               // unicast destnation encoded ips
 
 const char *modeStrings[7]={"Unknown","Record","PlayMulticast","PlayUnicast","PlayBroadcast","Serve","ServeBroadcast"};
 
@@ -263,8 +264,7 @@ int handleArgs(int argc, char *argv[]) {
   return 0;
 }
 
-// for unicast output modes "connect" to the destinations.  It is UDP so does not really connect
-// but it makes for more efficient packet sending later via send() vs sendto()
+// Set up outgoing socket structures so we dont have to build one up on every sendto
 //
 void serve_setup() {
   int i,ret;
@@ -281,7 +281,7 @@ void serve_setup() {
   //
   if(theMode==MODE_PLAY_BC || theMode==MODE_SERVE_BC) {
     int one=1;
-    theDestSock[0]=socket(AF_INET, SOCK_DGRAM, 0);                        // create socket
+    theDestSock[0]=socket(AF_INET, SOCK_DGRAM, 0);          // create socket
     setsockopt(theDestSock[0], SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
     memset(&bcDest,0,sizeof(bcDest));
     bcDest.sin_family = AF_INET;
@@ -292,17 +292,11 @@ void serve_setup() {
     // loop thru ip strings
     //
     for(i=0;theDestIP[i];i++) {
-      addr.sin_addr.s_addr = inet_addr(theDestIP[i]);                       // set IP
-      theDestSock[i]=socket(AF_INET, SOCK_DGRAM, 0);                        // create socket
-      ret=connect(theDestSock[i], (struct sockaddr *)&addr, sizeof(addr));  // connect
-      fprintf(logfile,"Connect %s status %d\n",theDestIP[i],ret);           // report
-
-      // error handle
-      //
-      if(ret<0) {
-        fprintf(logfile,"FATAL!  ERROR CONNECTING\n");
-        _exit(-1);
-      }
+      theDestSock[i]=socket(AF_INET, SOCK_DGRAM, 0);        // create socket
+      memset(&ucDest[i],0,sizeof(ucDest[i]));
+      ucDest[i].sin_family = AF_INET;
+      ucDest[i].sin_port = htons(thePortOut);
+      ucDest[i].sin_addr.s_addr = inet_addr(theDestIP[i]);
     }
   }
 }
@@ -387,8 +381,19 @@ int recorder(int fd) {
         //
         if(theMode!=MODE_SERVE_BC) {
           for(tgt=0;theDestSock[tgt];tgt++) {
-            send(theDestSock[tgt],packet.payload,packet.payloadSz,0);
+            nbytes=0;
+            //
+            // weird if condition follows to facilitate debug.  for now we wnat to send the zero byte payloads
+            //
+            if(1 || packet.payloadSz) {
+              nbytes=sendto(theDestSock[tgt],packet.payload,packet.payloadSz,0,(struct sockaddr*)&ucDest[tgt],sizeof(ucDest[tgt])); 
+            }
             //perror("send");
+            //if (nbytes < 0) { 
+            //  fprintf(logfile,"sz=%d nbytes=%d\n",packet.payloadSz,nbytes);
+            //  perror("send"); 
+            //  return 1; 
+            //}
           }
         } else {
           sendto(theDestSock[0],packet.payload,packet.payloadSz,0,(struct sockaddr*)&bcDest,sizeof(bcDest));
@@ -484,8 +489,18 @@ int player(int fd) {
         //
         if(theMode!=MODE_PLAY_BC) {
           for(tgt=0;theDestSock[tgt];tgt++) {
-            nbytes=send(theDestSock[tgt],packet.payload,packet.payloadSz,0);
-            //if (nbytes < 0) { perror("send"); return 1; }
+            nbytes=0;
+            //
+            // weird if condition follows to facilitate debug.  for now we wnat to send the zero byte payloads
+            //
+            if(1 || packet.payloadSz) { 
+              nbytes=sendto(theDestSock[tgt],packet.payload,packet.payloadSz,0,(struct sockaddr*)&ucDest[tgt],sizeof(ucDest[tgt])); 
+            }
+            //if (nbytes < 0) { 
+            //  fprintf(logfile,"sz=%d nbytes=%d\n",packet.payloadSz,nbytes);
+            //  perror("send"); 
+            //  return 1; 
+            //}
           }
         } else {
           nbytes=sendto(theDestSock[0],packet.payload,packet.payloadSz,0,(struct sockaddr*)&bcDest,sizeof(bcDest));
